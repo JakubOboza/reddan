@@ -100,4 +100,24 @@ Lindex
 Lrem
 Lset
 Ltrim
+Sadd
+Smembers
+Scard
+Sdiff
+SdiffStore
+Sinter
+SinterStore
+Sismember
+Smove
+Spop
+SrandMember
+SrandMemberX
+Srem
+Sunion
+SunionStore
+RunCommand
+RunArrayCommnad
 ```
+
+# Cheers
+Jakub Oboza

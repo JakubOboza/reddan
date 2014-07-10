@@ -9,16 +9,27 @@ import (
 	"errors"
 	"net"
 	"strconv"
+	//"fmt"
 )
 
 const (
 	bufSize int = 4096
+	// Response / Reply Type
+	RString int = 1
+	RInt    int = 2
+	RBool   int = 3
+	RArray  int = 4
 )
 
 var CLRF = "\r\n"
 
 type Client struct {
 	connection net.Conn
+}
+
+type Reply struct {
+	Rtype int
+	Response interface{}
 }
 
 // Example
@@ -47,7 +58,12 @@ func (client *Client) Close() error {
 	return client.connection.Close()
 }
 
-func readResponse(reader *bufio.Reader) (interface{}, error) {
+// Returns Major, Minor, Patch version of lib
+func Version() (int, int, int) {
+	return 0, 0, 2
+}
+
+func readResponse(reader *bufio.Reader) (*Reply, error) {
 
 	response_type, err := reader.ReadByte()
 
@@ -72,7 +88,7 @@ func readResponse(reader *bufio.Reader) (interface{}, error) {
 
 }
 
-func readArray(reader *bufio.Reader) ([]interface{}, error) {
+func readArray(reader *bufio.Reader) (*Reply, error) {
 	elements_to_read, err := reader.ReadBytes('\n')
 
 	if err != nil {
@@ -90,10 +106,10 @@ func readArray(reader *bufio.Reader) ([]interface{}, error) {
 		result[i] = res
 	}
 
-	return result, nil
+	return &Reply{Response: result, Rtype: RArray}, nil
 }
 
-func readString(reader *bufio.Reader) ([]byte, error) {
+func readString(reader *bufio.Reader) (*Reply, error) {
 	bytes_to_read, err := reader.ReadBytes('\n')
 
 	if err != nil {
@@ -113,11 +129,11 @@ func readString(reader *bufio.Reader) ([]byte, error) {
 
 	string_line, err := reader.ReadBytes('\n')
 
-	return string_line[0:num_bytes], nil
+	return &Reply{Response:string_line[0:num_bytes], Rtype: RString}, nil
 }
 
 // reades errors like -ERR not working :D\r\n
-func readError(reader *bufio.Reader) ([]byte, error) {
+func readError(reader *bufio.Reader) (*Reply, error) {
 	raw_response, err := reader.ReadBytes('\n')
 	if err != nil {
 		return nil, err
@@ -126,20 +142,20 @@ func readError(reader *bufio.Reader) ([]byte, error) {
 }
 
 // parses Simple string response like +OK\r\n
-func readSimpleString(reader *bufio.Reader) ([]byte, error) {
+func readSimpleString(reader *bufio.Reader) (*Reply, error) {
 	raw_response, err := reader.ReadBytes('\n')
 	if err != nil {
 		return nil, err
 	}
-	return raw_response[0 : len(raw_response)-2], nil
+	return &Reply{Response: raw_response[0 : len(raw_response)-2], Rtype: RString}, nil
 }
 
-func readInteger(reader *bufio.Reader) ([]byte, error) {
+func readInteger(reader *bufio.Reader) (*Reply, error) {
 	raw_response, err := reader.ReadBytes('\n')
 	if err != nil {
 		return nil, err
 	}
-	return raw_response[0 : len(raw_response)-2], nil
+	return &Reply{Response: raw_response[0 : len(raw_response)-2], Rtype: RInt }, nil
 }
 
 // Builds a command that will be written to the redis server connection
@@ -174,7 +190,11 @@ func (client *Client) executeKeyCommand(command []byte) (string, error) {
 	reader := bufio.NewReaderSize(client.connection, bufSize)
 	result, err := readResponse(reader)
 
-	if res, ok := result.([]byte); ok {
+	if err != nil {
+		return "", errors.New("Could not find key")
+	}
+
+	if res, ok := result.Response.([]byte); ok {
 		return string(res), err
 	} else {
 		return "", errors.New("Internal reddan error, could not recognize response type")
@@ -196,7 +216,7 @@ func (client *Client) executeBoolCommand(command []byte) (bool, error) {
 		return false, err
 	}
 
-	if res, ok := result.([]byte); ok {
+	if res, ok := result.Response.([]byte); ok {
 		return strconv.ParseBool(string(res))
 	} else {
 		return false, errors.New("Internal reddan error, could not recognize response type")
@@ -218,7 +238,7 @@ func (client *Client) executeIntCommand(command []byte) (int, error) {
 		return 0, err
 	}
 
-	if res, ok := result.([]byte); ok {
+	if res, ok := result.Response.([]byte); ok {
 		return strconv.Atoi(string(res))
 	} else {
 		return 0, errors.New("Internal reddan error, unexpected response type")
@@ -240,12 +260,14 @@ func (client *Client) executeStringArrayCommand(command []byte) ([]string, error
 		return nil, err
 	}
 
-	if res, ok := result.([]interface{}); ok {
+	if res, ok := result.Response.([]interface{}); ok {
 
 		result_array := make([]string, len(res))
 
+		// TODO requires work on errors and refactor
 		for i, elem := range res {
-			el := elem.([]byte)
+			origin, _ := elem.(*Reply)    // change _ to ok and refactor Array responses
+			el := origin.Response.([]byte)
 			result_array[i] = string(el)
 		}
 		return result_array, nil
@@ -254,6 +276,56 @@ func (client *Client) executeStringArrayCommand(command []byte) ([]string, error
 		return nil, errors.New("Internal reddan error, unexpected response type")
 	}
 
+}
+
+// this method returns an array or responses that client has to handle
+// considering adding error to the reply type but i don't know if we really need it
+// response can contain nil's!
+func (client *Client) executeAnyArrayCommand(command []byte) ([]*Reply, error) {
+	_, err := client.runCommand(command)
+
+	if err != nil {
+		return nil, err
+	}
+
+	reader := bufio.NewReaderSize(client.connection, bufSize)
+	result, err := readResponse(reader)
+
+	if err != nil {
+		return nil, err
+	}
+
+	if res, ok := result.Response.([]interface{}); ok {
+
+		result_array := make([]*Reply, len(res))
+
+		for i, elem := range res {
+			origin, _ := elem.(*Reply)
+			result_array[i] = origin
+		}
+		return result_array, nil
+
+	} else {
+		return nil, errors.New("Internal reddan error, unexpected response type")
+	}
+
+}
+
+func (client *Client) executeAnyCommand(command []byte) (*Reply, error) {
+	_, err := client.runCommand(command)
+
+	if err != nil {
+		return nil, err
+	}
+
+	reader := bufio.NewReaderSize(client.connection, bufSize)
+	result, err := readResponse(reader)
+
+	if err != nil {
+		return nil, err
+	}
+
+	return result, nil
 }
 
 // API Implementation starts here
@@ -406,5 +478,78 @@ func (client *Client) Ltrim(list string, from int, to int) (string ,error) {
 	return client.executeKeyCommand(buildCommand("LTRIM", list, strconv.Itoa(from), strconv.Itoa(to)))
 }
 
+// Set Commands
+
+func (client *Client) Sadd(set string, member string) (int, error) {
+	return client.executeIntCommand(buildCommand("SADD", set, member))
+}
+
+func (client *Client) Smembers(set string) ([]string, error) {
+	return client.executeStringArrayCommand(buildCommand("SMEMBERS", set))
+}
+
+func (client *Client) Scard(set string) (int, error) {
+	return client.executeIntCommand(buildCommand("SCARD", set))
+}
+
+func (client *Client) Sdiff(sets ...string) ([]string, error){
+	return client.executeStringArrayCommand(buildCommand("SDIFF", sets...))
+}
+
+func (client *Client) SdiffStore(dest string, sleft string, sright string) (int, error) {
+	return client.executeIntCommand(buildCommand("SDIFFSTORE",dest, sleft, sright))
+}
+
+func (client *Client) Sinter(sets ...string) ([]string, error) {
+	return client.executeStringArrayCommand(buildCommand("SINTER", sets...))
+}
+
+func (client *Client) SinterStore(dest string, sleft string , sright string) (int ,error) {
+	return client.executeIntCommand(buildCommand("SINTERSTORE", dest, sleft, sright))
+}
+
+func (client *Client) Sismember(set string, member string) (bool, error) {
+	return client.executeBoolCommand(buildCommand("SISMEMBER", set, member))
+}
+
+func (client *Client) Smove(set string, dest string, key string) (bool, error) {
+	return client.executeBoolCommand(buildCommand("SMOVE", set, dest, key))
+}
+
+func (client *Client) Spop(set string) (string ,error) {
+	return client.executeKeyCommand(buildCommand("SPOP", set))
+}
+
+func (client *Client) SrandMember(set string) (string, error) {
+  return client.executeKeyCommand(buildCommand("SRANDMEMBER", set))
+}
+
+func (client *Client) SrandMemberX(set string, num int) ([]string, error) {
+	return client.executeStringArrayCommand(buildCommand("SRANDMEMBER", strconv.Itoa(num)))
+}
+
+func (client *Client) Srem(set string, key string) (int, error) {
+	return client.executeIntCommand(buildCommand("SREM", set, key))
+}
+
+func (client *Client) Sunion(sets ...string) ([]string, error) {
+	return client.executeStringArrayCommand(buildCommand("SUNION", sets...))
+}
+
+func (client *Client) SunionStore(dest string, sleft string, sright string) (int, error) {
+	return client.executeIntCommand(buildCommand("SUNIONSTORE", dest, sleft, sright))
+}
+
+// Any Commands
+// if something is not supported but needed to be executed
+// You will have to handle reply on your own, cast to right thing etc...
+
+func (client *Client) RunCommand(cmd string, args ...string) (*Reply, error) {
+	return client.executeAnyCommand(buildCommand(cmd, args...))
+}
+
+func (client *Client) RunArrayCommnad(cmd string, args ...string) ([]*Reply, error) {
+	return client.executeAnyArrayCommand(buildCommand(cmd, args...))
+}
 
 
